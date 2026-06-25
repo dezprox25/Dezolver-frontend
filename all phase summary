@@ -1,0 +1,1563 @@
+
+All tasks complete and build passes. Here's the full Phase 2 summary:
+
+---
+Phase 2 Authentication — Complete
+
+Authentication Architecture
+
+The frontend uses an in-memory access token + httpOnly refresh cookie pattern:
+- accessToken lives only in Zustand store (never localStorage/sessionStorage)
+- Refresh token is an httpOnly cookie — JavaScript cannot read it
+- On app startup, SessionProvider calls tryRefresh() to silently restore sessions
+- On 401, apiClient interceptor queues all in-flight requests, calls /auth/refresh, replays them
+
+APIs Integrated
+
+┌─────────────────────────────────────────┬───────────────────────────────────────────────────────┐
+│                   API                   │                      Where used                       │
+├─────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+│ POST /auth/login                        │ LoginPage → authService.login                         │
+├─────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+│ POST /auth/mfa/verify                   │ MfaVerifyPage → authService.verifyMfa                 │
+├─────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+│ POST /auth/signup                       │ SignupPage → authService.signup                       │
+├─────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+│ POST /auth/refresh                      │ SessionProvider + 401 interceptor                     │
+├─────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+│ POST /auth/logout                       │ Topbar → authService.logout                           │
+├─────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+│ POST /auth/logout/all                   │ Topbar → authService.logoutAll                        │
+├─────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+│ POST /auth/forgot-password              │ ForgotPasswordPage                                    │
+├─────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+│ POST /auth/reset-password               │ ResetPasswordPage                                     │
+├─────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+│ GET /me                                 │ SessionProvider, useCurrentUserQuery, login/mfa flows │
+├─────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+│ POST /me/switch-user                    │ Topbar account switcher                               │
+├─────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+│ GET /tenants/by-subdomain/:subdomain    │ AuthLayout branding                                   │
+├─────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+│ POST /tenants/invitations/:token/accept │ InvitationAcceptPage                                  │
+├─────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+│ GET /users/me/mfa                       │ Settings Security section                             │
+├─────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+│ POST /users/me/mfa/enroll               │ MFA enrollment dialog                                 │
+├─────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+│ POST /users/me/mfa/confirm              │ MFA enrollment confirm                                │
+├─────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+│ DELETE /users/me/mfa                    │ MFA disable dialog                                    │
+└─────────────────────────────────────────┴───────────────────────────────────────────────────────┘
+
+Files Created / Modified
+
+Created:
+- src/services/api/users.service.ts — MFA management, data export, account deletion APIs
+- src/pages/auth/InvitationAcceptPage.tsx — Invitation accept flow (/invitations/accept/:token)
+
+Modified:
+- src/components/guards/AuthGuard.tsx — Now passes state: { from } so login redirects back to the originally requested page
+- src/hooks/useCurrentUser.ts — Added usePermissionsQuery (TanStack Query, shares ME cache, derives permissions via select)
+- src/components/layouts/AuthLayout.tsx — Detects subdomain on mount, fetches tenant branding, injects logo/name + CSS variable; shows generic Dezolver branding otherwise
+- src/routes/index.tsx — Added /invitations/accept/:token route and MFA verify under shared semi-public layout group
+- src/pages/settings/SettingsPage.tsx — Full MFA management: status badge, enrollment dialog (secret reveal + TOTP confirm), disable confirmation dialog
+- src/components/layouts/Topbar.tsx — Account switching submenu appears when linkedUsers contains accounts the user can switch to
+- src/services/api/index.ts — Exports usersService and MFA types
+- src/pages/dashboard/DashboardPage.tsx — Phase 2 completion indicator
+
+Backend Assumptions Made
+
+1. GET /users/me/mfa returns { enrolled: boolean, factorType?: string } wrapped in { data: T }
+2. POST /users/me/mfa/enroll returns { secret: string, otpauthUri: string, qrCodeDataUrl?: string } — if the backend returns qrCodeDataUrl, the enrollment dialog renders it as a QR image; otherwise it shows the raw secret for manual entry
+3. POST /tenants/invitations/:token/accept may return { accessToken?: string } — if a token is present (user was newly provisioned), the session is updated automatically
+
+
+
+======================
+---
+Phase 3 Complete
+
+Dashboard Architecture Summary
+
+The framework follows a widget-first composition model: every section on the dashboard is an independent, self-contained widget with its own loading/error/empty states. Future modules plug in by adding widgets to the DashboardPage grid — no layout changes needed.
+
+---
+Folder Changes
+
+src/
+├── types/
+│   └── dashboard.types.ts          NEW — DashboardStats, ActivityItem, QuickAction, WidgetConfig, AppNotification
+│
+├── services/api/
+│   └── dashboard.service.ts        NEW — getStats(role), getActivity(role) with role-aware mock data
+│
+├── hooks/
+│   ├── useDashboard.ts             NEW — useDashboardStats, useDashboardActivity, useNotifications
+│   └── useCurrentUser.ts           MOD — removed stale void queryClient expression
+│
+├── components/dashboard/           NEW FOLDER
+│   ├── DashboardWidget.tsx         Base container: loading/error/empty states + WidgetHeader/Content
+│   ├── WidgetSkeleton.tsx          WidgetSkeleton + KpiRowSkeleton
+│   ├── DashboardGrid.tsx           DashboardGrid (responsive CSS grid) + GridItem (span 1-4)
+│   ├── cards/
+│   │   ├── StatCard.tsx            Number + label + change indicator
+│   │   ├── MetricCard.tsx          Metric with trend badge (prev value → % change)
+│   │   └── TrendCard.tsx           Metric + inline SVG sparkline (no external chart lib)
+│   ├── notifications/
+│   │   ├── NotificationCenter.tsx  Bell button + Popover panel (mark read, clear all)
+│   │   └── NotificationItem.tsx    Single notification row with severity icon + unread dot
+│   ├── activity/
+│   │   ├── ActivityTimeline.tsx    Timeline container
+│   │   └── ActivityItem.tsx        Typed icon + title/description + relative timestamp
+│   └── actions/
+│       ├── QuickActionGrid.tsx     Responsive 2-col grid of action cards
+│       └── QuickActionCard.tsx     Card with icon, label, description, "Coming soon" overlay
+│
+├── components/shared/
+│   ├── ImpersonationBanner.tsx     NEW — amber banner + exit button (hidden until Phase 4 sets flag)
+│   └── ErrorBoundary.tsx           NEW — React class boundary, catches render errors, shows retry
+│
+├── components/ui/
+│   └── popover.tsx                 NEW — shadcn Popover wrapper (uses @radix-ui/react-popover)
+│
+├── components/layouts/
+│   ├── AppLayout.tsx               MOD — added ImpersonationBanner + ErrorBoundary around Outlet
+│   ├── Sidebar.tsx                 MOD — full role-based NAV_REGISTRY per blueprint Section 5
+│   └── Topbar.tsx                  MOD — bell replaced with NotificationCenter; removed unread import
+│
+├── providers/
+│   ├── WebSocketProvider.tsx       NEW — connects on auth, auto-joins channels, dispatches notifications
+│   └── index.tsx                   MOD — WebSocketProvider added inside SessionProvider
+│
+├── store/
+│   └── authStore.ts                MOD — added isImpersonating, impersonatorInfo, setImpersonating
+│
+├── lib/constants/index.ts          MOD — QUERY_KEYS.DASHBOARD.{STATS, ACTIVITY, NOTIFICATIONS}
+│
+├── pages/dashboard/
+│   └── DashboardPage.tsx           REBUILT — KpiRow + ActivityWidget + QuickActionsWidget, all role-aware
+│
+└── services/api/index.ts           MOD — exports dashboardService
+
+Components Created
+
+┌─────────────────────────────────┬─────────────────────────────────────────────────────────┐
+│            Component            │                         Purpose                         │
+├─────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ DashboardWidget                 │ Universal widget shell — every future widget wraps this │
+├─────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ WidgetHeader / WidgetContent    │ Composable widget internals                             │
+├─────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ WidgetSkeleton / KpiRowSkeleton │ Skeleton loaders matched to widget shapes               │
+├─────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ DashboardGrid / GridItem        │ Responsive CSS grid (1-4 col spans)                     │
+├─────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ StatCard                        │ Simple KPI: value + label + change arrow                │
+├─────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ MetricCard                      │ KPI with previous-value trend badge                     │
+├─────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ TrendCard                       │ KPI with inline SVG sparkline                           │
+├─────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ NotificationCenter              │ Full notification panel (Popover)                       │
+├─────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ NotificationItem                │ Row with severity icon + unread dot                     │
+├─────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ ActivityTimeline                │ Vertical timeline with typed icons                      │
+├─────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ QuickActionCard / Grid          │ Role-specific action shortcuts with comingSoon overlay  │
+├─────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ ImpersonationBanner             │ Amber banner for impersonation sessions                 │
+├─────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ ErrorBoundary                   │ React class boundary with retry                         │
+└─────────────────────────────────┴─────────────────────────────────────────────────────────┘
+
+Hooks Created
+
+┌────────────────────────┬────────────────────────────────────────────────────────────────────────────────┐
+│          Hook          │                                    Returns                                     │
+├────────────────────────┼────────────────────────────────────────────────────────────────────────────────┤
+│ useDashboardStats()    │ { data: DashboardStats, isLoading, isError, refetch }                          │
+├────────────────────────┼────────────────────────────────────────────────────────────────────────────────┤
+│ useDashboardActivity() │ { data: ActivityItem[], isLoading, isError, refetch }                          │
+├────────────────────────┼────────────────────────────────────────────────────────────────────────────────┤
+│ useNotifications()     │ { notifications, unreadCount, hasUnread, markAsRead, markAllAsRead, clearAll } │
+└────────────────────────┴────────────────────────────────────────────────────────────────────────────────┘
+
+Services Created
+
+┌──────────────────┬─────────────────────────────────────────────────────────────────────┐
+│     Service      │                               Methods                               │
+├──────────────────┼─────────────────────────────────────────────────────────────────────┤
+│ dashboardService │ getStats(role) → role-aware KPIs; getActivity(role) → activity feed │
+└──────────────────┴─────────────────────────────────────────────────────────────────────┘
+
+
+
+
+
+
+    ===============================================================
+
+Phase 4 — Complete New Routes & Pages ┌──────────────────────────────┬──────────────────┬──────────────────────────────────────────────────────────────────────────┐ │ Route │ Page │ Description │ ├──────────────────────────────┼──────────────────┼──────────────────────────────────────────────────────────────────────────┤ │ /platform/tenants/:id/config │ TenantConfigPage │ Branding (logo, favicon, color) + feature flags (SSO, path lock) │ ├──────────────────────────────┼──────────────────┼──────────────────────────────────────────────────────────────────────────┤ │ /tenant/users │ UsersPage │ College-admin user roster — active members tab + pending invitations tab │ ├──────────────────────────────┼──────────────────┼──────────────────────────────────────────────────────────────────────────┤ │ /tenant/users/:id │ UserDetailPage │ Member detail (role, cohort, join date) │ ├──────────────────────────────┼──────────────────┼──────────────────────────────────────────────────────────────────────────┤ │ /platform/persons │ PersonsPage │ Platform-admin person ID lookup │ ├──────────────────────────────┼──────────────────┼──────────────────────────────────────────────────────────────────────────┤ │ /platform/persons/:id │ PersonDetailPage │ Full person profile + all linked tenant users + impersonation dialog │ ├──────────────────────────────┼──────────────────┼──────────────────────────────────────────────────────────────────────────┤ │ /permissions │ PermissionsPage │ Full permission matrix with role filter │ └──────────────────────────────┴──────────────────┴──────────────────────────────────────────────────────────────────────────┘ New Hooks / Services Created - hooks/usePersons.ts — usePerson(id) and useImpersonate() mutation (sets token + isImpersonating flag + invalidates /me) Existing Files Updated - routes/index.tsx — all new routes with RoleGate guards - Sidebar.tsx — Users in college_admin Institution section; Persons in platform_admin Tenants section; Roles + Permissions in college_admin Admin section - lib/constants/index.ts — ROUTES constant extended with all Phase 4 paths; duplicate removed - lib/schemas/tenant.schemas.ts — removed purged from transition schema (matches TransitionTenantDto type) - Pre-existing TenantDetailPage / TenantTransitionPage — minor unused-import cleanup API Mismatches Found ┌────────────────────────────────────────────────────────────────────────────────────┬─────────────────────────────────────────────────────────────────────────────────┐ │ Gap │ Impact │ ├────────────────────────────────────────────────────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────┤ │ No GET /tenants/:id/users endpoint │ UsersPage uses invitations API as proxy — accepted invitations = active members │ ├────────────────────────────────────────────────────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────┤ │ No GET /persons list endpoint │ PersonsPage provides ID-lookup form instead of a list │ ├────────────────────────────────────────────────────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────┤ │ No bulk CSV roster import endpoint (in swagger) despite product docs mentioning it │ CSV import page deferred; single-invite flow is complete │ └────────────────────────────────────────────────────────────────────────────────────┴─────────────────────────────────────────────────────────────────────────────────┘ Build: ✅ TypeScript clean, Vite build succeeds. Foundation ready for Phase 5 (Curriculum & Content).
+
+
+==============================================
+
+Dev Login Bypass — Now Implemented
+
+Open the app at http://localhost:3001 and you'll see a Developer Login panel (amber dashed border) below the normal sign-in form. Click any persona to instantly enter the app as that role — no backend needed.
+
+┌────────────────────┬──────────────────────────────┬─────────────────────┬──────────────────────────────┬──────────────┐
+│     Role Badge     │            Email             │      Full Name      │            Tenant            │     Plan     │
+├────────────────────┼──────────────────────────────┼─────────────────────┼──────────────────────────────┼──────────────┤
+│ Platform Admin     │ admin@dezolver.dev           │ Dev Platform Admin  │ Dezolver Platform (direct)   │ unlimited    │
+├────────────────────┼──────────────────────────────┼─────────────────────┼──────────────────────────────┼──────────────┤
+│ Platform Moderator │ moderator@dezolver.dev       │ Dev Moderator       │ Dezolver Platform (direct)   │ unlimited    │
+├────────────────────┼──────────────────────────────┼─────────────────────┼──────────────────────────────┼──────────────┤
+│ College Admin      │ admin@iit-dev.dezolver.dev   │ Dev College Admin   │ IIT Dev University (college) │ professional │
+├────────────────────┼──────────────────────────────┼─────────────────────┼──────────────────────────────┼──────────────┤
+│ Coordinator        │ coord@iit-dev.dezolver.dev   │ Dev Coordinator     │ IIT Dev University (college) │ professional │
+├────────────────────┼──────────────────────────────┼─────────────────────┼──────────────────────────────┼──────────────┤
+│ Faculty            │ faculty@iit-dev.dezolver.dev │ Dev Faculty         │ IIT Dev University (college) │ professional │
+├────────────────────┼──────────────────────────────┼─────────────────────┼──────────────────────────────┼──────────────┤
+│ Content Manager    │ content@dezolver.dev         │ Dev Content Manager │ Dezolver Platform (direct)   │ unlimited    │
+├────────────────────┼──────────────────────────────┼─────────────────────┼──────────────────────────────┼──────────────┤
+│ Student            │ student@iit-dev.dezolver.dev │ Dev Student         │ IIT Dev University (college) │ professional │
+└────────────────────┴──────────────────────────────┴─────────────────────┴──────────────────────────────┴──────────────┘
+
+How it works
+
+- No API calls — sessions are created entirely in the browser using the Zustand setFullAuth action
+- Persists on refresh — stored in sessionStorage (survives page reload, cleared on tab close or logout)
+- Zero production impact — import.meta.env.DEV is false in production builds; Vite tree-shakes the entire DevLoginPanel and mockUsers.ts out of the bundle (verified: none of the dev strings appear in dist/)
+- Each role shows the correct sidebar — Platform Admin sees tenant management + persons; College Admin sees users/cohorts/invitations; Student sees the student-focused nav
+
+✻ Cooked for 5m 54s
+
+
+
+
+
+=======================================================
+
+
+Phase 5 is complete. Here's the full deliverables report:
+
+---
+Phase 5 — Content Catalog Complete
+
+Build: ✅ TypeScript clean, Vite builds successfully
+
+---
+APIs Integrated
+
+┌───────────────────────────────────────┬─────────────┬──────────────────────────────────┐
+│               Endpoint                │   Method    │             Used In              │
+├───────────────────────────────────────┼─────────────┼──────────────────────────────────┤
+│ /api/v1/rooms                         │ GET         │ useRooms → RoomsPage             │
+├───────────────────────────────────────┼─────────────┼──────────────────────────────────┤
+│ /api/v1/rooms/:slug                   │ GET         │ useRoom → RoomDetailPage         │
+├───────────────────────────────────────┼─────────────┼──────────────────────────────────┤
+│ /api/v1/rooms/:slug/versions          │ GET         │ useRoomVersions → RoomDetailPage │
+├───────────────────────────────────────┼─────────────┼──────────────────────────────────┤
+│ /api/v1/rooms                         │ POST        │ useCreateRoom → RoomCreatePage   │
+├───────────────────────────────────────┼─────────────┼──────────────────────────────────┤
+│ /api/v1/rooms/:id                     │ PATCH       │ useUpdateRoom                    │
+├───────────────────────────────────────┼─────────────┼──────────────────────────────────┤
+│ /api/v1/rooms/:id/submit-for-review   │ POST        │ useRoomLifecycle                 │
+├───────────────────────────────────────┼─────────────┼──────────────────────────────────┤
+│ /api/v1/rooms/:id/approve             │ POST        │ useRoomLifecycle                 │
+├───────────────────────────────────────┼─────────────┼──────────────────────────────────┤
+│ /api/v1/rooms/:id/rollback/:versionId │ POST        │ useRoomLifecycle                 │
+├───────────────────────────────────────┼─────────────┼──────────────────────────────────┤
+│ /api/v1/rooms/:id/archive             │ POST        │ useRoomLifecycle                 │
+├───────────────────────────────────────┼─────────────┼──────────────────────────────────┤
+│ /api/v1/courses                       │ GET/POST    │ Courses hooks                    │
+├───────────────────────────────────────┼─────────────┼──────────────────────────────────┤
+│ /api/v1/courses/:slug                 │ GET         │ useCourse                        │
+├───────────────────────────────────────┼─────────────┼──────────────────────────────────┤
+│ /api/v1/courses/:id/rooms             │ POST/DELETE │ Room-in-course management        │
+├───────────────────────────────────────┼─────────────┼──────────────────────────────────┤
+│ /api/v1/problems                      │ GET/POST    │ Problems hooks                   │
+├───────────────────────────────────────┼─────────────┼──────────────────────────────────┤
+│ /api/v1/problems/:slug                │ GET         │ useProblem                       │
+├───────────────────────────────────────┼─────────────┼──────────────────────────────────┤
+│ /api/v1/problems/:id/test-cases       │ POST        │ ProblemCreatePage                │
+├───────────────────────────────────────┼─────────────┼──────────────────────────────────┤
+│ /api/v1/problems/:id/publish          │ POST        │ usePublishProblem                │
+├───────────────────────────────────────┼─────────────┼──────────────────────────────────┤
+│ /api/v1/media/uploads/initiate        │ POST        │ mediaService.upload              │
+├───────────────────────────────────────┼─────────────┼──────────────────────────────────┤
+│ /api/v1/media/uploads/complete        │ POST        │ mediaService.upload              │
+├───────────────────────────────────────┼─────────────┼──────────────────────────────────┤
+│ /api/v1/media/:assetId/url            │ GET         │ AssetSheet                       │
+├───────────────────────────────────────┼─────────────┼──────────────────────────────────┤
+│ /api/v1/search                        │ POST        │ useContentSearch                 │
+└───────────────────────────────────────┴─────────────┴──────────────────────────────────┘
+
+Components Created
+
+ContentStatusBadge, DifficultyBadge, BlockRenderer (all 8 types), RoomBody, MediaUploader (XHR progress), Progress (shadcn)
+
+Hooks Created
+
+useRooms, useRoom, useRoomVersions, useCreateRoom, useUpdateRoom, useRoomLifecycle, useCourses, useCourse, useCreateCourse, useAddRoomToCourse, useRemoveRoomFromCourse, useProblems, useProblem, useCreateProblem, useAddTestCase, usePublishProblem, useMediaUpload, useContentSearch, useDebouncedSearch
+
+Services Created
+
+content.service.ts, media.service.ts, search.service.ts
+
+Routes Added
+
+/content/rooms, /content/rooms/create, /content/rooms/:slug, /content/courses, /content/courses/create, /content/courses/:slug, /content/problems, /content/problems/create, /content/problems/:slug, /content/media, /search
+
+Backend Limitations Found
+
+┌──────────────────────────────────────────────┬─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                  Limitation                  │                                             Impact                                              │
+├──────────────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ No GET /media list endpoint                  │ MediaLibraryPage shows only session-local uploads; full asset browser requires backend addition │
+├──────────────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Room progress stubs in Paths module          │ Not Phase 5 — noted for Phase 6                                                                 │
+├──────────────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Assessment.tenantId missing from schema      │ Noted for Phase 6 Assessments                                                                   │
+├──────────────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Backend uses slug for GETs, ID for mutations │ Handled correctly — service layer uses appropriate identifiers                                  │
+├──────────────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Hidden test cases returned based on role     │ Suppressed client-side via isSample filter; backend enforces server-side projection             │
+└──────────────────────────────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+✻ Brewed for 18m 51s
+
+=======================================================================
+
+---
+Phase 5 Quality Audit — Content Catalog
+
+Reviewed: 3 services, 5 hooks, 2 components, 10 pages, 1 router file, 1 sidebar file, 2 schema files
+Build state: ✅ clean
+
+---
+Critical Issues
+
+These must be resolved before Phase 6 ships any feature that depends on content.
+
+---
+1. Create routes are completely unprotected
+
+File: routes/index.tsx:102–125
+
+The entire /content route tree has no RoleGate or PermissionGate wrapping it:
+
+{
+  path: 'content',
+  element: <Outlet />,   // ← no guard
+  children: [
+    { path: 'rooms/create', element: <RoomCreatePage /> },
+    { path: 'courses/create', element: <CourseCreatePage /> },
+    { path: 'problems/create', element: <ProblemCreatePage /> },
+
+Any authenticated user — including students — can navigate directly to /content/rooms/create, see the full authoring form, and submit. The page hides the "New Room" button via usePermissions('publish:content') but only when arriving via the list page. Direct URL access bypasses this entirely. The backend will reject the request, but students get a confusing authoring UI.
+
+---
+2. The "Edit" button in RoomDetailPage navigates to a 404
+
+File: pages/content/rooms/RoomDetailPage.tsx:97
+
+onClick={() => navigate(`/content/rooms/${room.slug}/edit`)}
+
+The route rooms/:slug/edit does not exist in the router. There is no RoomEditPage and no registered route. Clicking "Edit" on any draft room produces a Not Found screen. This is the primary authoring workflow for content managers.
+
+---
+3. Search fires a POST request on every character — no debounce
+
+File: pages/content/search/SearchPage.tsx:80, 103–108
+
+const { data, isFetching, isError } = useContentSearch(query, kind)
+// ...
+onChange={(e) => setQuery(e.target.value)}
+
+useContentSearch has enabled: q.trim().length >= 2. Once the query reaches 2 characters, every subsequent keystroke fires POST /api/v1/search immediately. Typing "data structures" generates 13 API calls. The useDebouncedSearch hook in useContentSearch.ts exists but is never used anywhere. The SearchPage imports and uses the non-debounced version.
+
+---
+4. RoomBody uses array index as React key
+
+File: components/content/BlockRenderer.tsx:177
+
+{blocks.map((block, i) => (
+  <BlockRenderer key={i} block={block} />
+))}
+
+Index keys cause React to reuse the wrong DOM node when blocks are removed from the middle or reordered. In the BlockEditor (which allows remove-by-index), this causes controlled <input> and <Textarea> values to display in the wrong block after a deletion. The blocks have no stable id field, so the fix requires either adding id to block types or using a stable hash of the block's position and type as the key.
+
+---
+5. Hooks called with empty-string IDs before data resolves
+
+Files:
+- pages/content/rooms/RoomDetailPage.tsx:38–41 — useRoomLifecycle(room?.id ?? '', slug ?? '')
+- pages/content/problems/ProblemDetailPage.tsx:23–26 — usePublishProblem(problem?.id ?? '', slug ?? '')
+- pages/content/courses/CourseDetailPage.tsx:20 — useRemoveRoomFromCourse(course?.id ?? '')
+
+Each hook closes over an empty string '' during the initial render when data hasn't loaded yet. The mutation functions returned by these hooks reference that empty ID at the time the hook was called, not reactively. If the mutation somehow fires before the data query resolves (e.g., via a race condition or direct test call), it makes a request to /rooms//approve or /courses//rooms/x, producing a malformed URL that goes to an unintended backend handler.
+
+---
+6. ProblemCreatePage test case failures leave orphaned partial problems
+
+File: pages/content/problems/ProblemCreatePage.tsx:65–76
+
+const problem = await createProblem(...)
+for (const tc of testCases.filter(...)) {
+  await contentService.addTestCase(problem.id, tc)  // no try/catch
+}
+toast.success(...)
+navigate(...)
+
+If createProblem succeeds but any subsequent addTestCase call throws (network error, validation failure), the problem exists in the database with zero or partial test cases, but the catch in onSubmit catches the error at the for loop level and shows "Failed to create problem." This leaves the user on the create page believing nothing was created, when in fact an unpublished draft problem now exists. There is also no per-test-case error reporting — a partial failure produces the same error message as a total failure.
+
+---
+Recommended Improvements
+
+---
+7. Default status filter should be role-aware
+
+Files: pages/content/rooms/RoomsPage.tsx:43, pages/content/problems/ProblemsPage.tsx:30
+
+Both list pages default statusFilter to 'all', which exposes draft and archived rooms/problems to students browsing the catalog. Students should see only published content by default. Content managers and platform admins should see all statuses. The fix is a one-line initial state: useState<ContentStatus | 'all'>(canAuthor ? 'all' : 'published').
+
+---
+8. CoursesPage is missing the review status option
+
+File: pages/content/courses/CoursesPage.tsx:45–49
+
+<SelectItem value="draft">Draft</SelectItem>
+<SelectItem value="published">Published</SelectItem>
+<SelectItem value="archived">Archived</SelectItem>
+// "review" is absent
+
+ContentStatus has four values (draft, review, published, archived). Rooms and Problems include review in their filters; Courses does not. Content managers cannot filter to see courses awaiting approval.
+
+---
+9. Icon-only buttons have no aria-label
+
+Files:
+- pages/content/rooms/RoomsPage.tsx:115 — <Button variant="ghost" size="icon" title="Refresh">
+- pages/content/courses/CoursesPage.tsx — same pattern
+- pages/content/problems/ProblemsPage.tsx — same pattern
+- pages/content/rooms/RoomDetailPage.tsx:108 — <Button> with only <MoreHorizontal /> icon
+
+title is a tooltip, not an accessible label. Screen readers do not reliably announce it. These buttons need aria-label="Refresh" / aria-label="More options".
+
+---
+10. Clickable cards are not keyboard-accessible
+
+Files: RoomsPage.tsx:149–179, CoursesPage.tsx, ProblemsPage.tsx:138
+
+All list items are <div onClick={...}>. They cannot be reached by Tab, and pressing Enter does nothing. They should either be <button> elements (no href) or include tabIndex={0} plus onKeyDown={(e) => e.key === 'Enter' && navigate(...)}.
+
+---
+11. MediaUploader drop zone is not keyboard-accessible
+
+File: components/content/MediaUploader.tsx:91–116
+
+The drop zone div has onClick={() => inputRef.current?.click()} but no tabIndex or keyboard handler. Users who navigate by keyboard cannot activate the upload. The role="button" attribute and onKeyDown handler are missing.
+
+---
+12. Callout emoji icons need aria-hidden
+
+File: components/content/BlockRenderer.tsx:14–20
+
+const calloutIcons: Record<CalloutTone, string> = {
+  info: 'ℹ',
+  warning: '⚠',
+  ...
+}
+// Used as: <span className="shrink-0 select-none text-base">{calloutIcons[tone]}</span>
+
+Screen readers will announce these Unicode characters by name ("information source", "warning sign"). The icon is decorative — the tone is communicated by color and the CalloutTone type context. Add aria-hidden="true" to the <span>.
+
+---
+13. prose class on content tab has no effect
+
+File: pages/content/rooms/RoomDetailPage.tsx:174–177
+
+<div className="prose prose-sm max-w-none">
+  <RoomBody blocks={room.body ?? []} />
+</div>
+
+The @tailwindcss/typography plugin is not installed in this project. The prose class produces no styling. The RoomBody content already has its own padding and spacing from the BlockRenderer components. This is harmless but misleading.
+
+---
+14. Problem statement rendered as raw text, not Markdown
+
+File: pages/content/problems/ProblemDetailPage.tsx
+
+<pre className="whitespace-pre-wrap text-sm leading-relaxed font-sans">
+  {problem.statementMd}
+</pre>
+
+The product documentation specifies statementMd as Markdown. Rendering it inside a <pre> shows raw markdown syntax (**bold**, - bullets, $math$) as literal text. This makes the statement unreadable for problems with any formatting. At minimum, a Markdown-to-HTML renderer is needed here. Until one is added, the field name statementMd is misleading to users who expect rendered output.
+
+---
+15. useRoomLifecycle invalidate function closes over a stale invalidate reference
+
+File: hooks/useRooms.ts:56–77
+
+const invalidate = () => {
+  qc.invalidateQueries({ queryKey: [...QUERY_KEYS.ROOMS, slug] })
+  qc.invalidateQueries({ queryKey: QUERY_KEYS.ROOMS })
+}
+
+invalidate is a plain function defined inside the hook body. Each time useRoomLifecycle renders, invalidate is redefined. Each useMutation captures the invalidate reference at the time the mutation is created. If the hook re-renders between when a mutation object is created and when the mutation resolves, the onSuccess handler may fire with a stale invalidate closure. The fix is useCallback(() => {...}, [qc, slug]).
+
+---
+16. Query cache inconsistency after room lifecycle actions
+
+File: hooks/useRooms.ts:49
+
+useUpdateRoom calls:
+qc.setQueryData([...QUERY_KEYS.ROOMS, room.slug], room)
+
+But useRoom queries by slug using key [...QUERY_KEYS.ROOMS, slug]. After an update, setQueryData correctly updates the detail cache. However, after lifecycle actions (submitForReview, approve, etc.), the cache is invalidated rather than updated — triggering a network refetch. This is correct behavior, but it means a brief loading flash after every lifecycle action. This is a UX gap compared to phases 1-4, where mutations used setQueryData for instant optimistic updates.
+
+---
+Nice-to-Have Improvements
+
+---
+17. Unused command.tsx component
+command.tsx was installed during Phase 5 setup but is unused. A global command palette (Cmd+K) for content search would make Phase 5 dramatically faster to use, especially for content managers who know room/problem names. The component is ready to wire up.
+
+---
+18. No breadcrumb navigation on detail pages
+Phase 3 added AppBreadcrumb. None of the content pages use it. Navigating to /content/rooms/binary-search-trees-insertion shows no breadcrumb trail. Adding Rooms > Binary Search Trees — Insertion would match the UX convention from Phase 4's tenant pages.
+
+---
+19. Total item count not shown on list pages
+The rooms/courses/problems list pages show no total count. With cursor pagination, showing "Showing 20 of 142 rooms" is meaningful for content managers tracking catalog size. The backend returns pagination.hasMore but not a total count — this would require a backend change or a separate count query.
+
+---
+20. BlockEditor blocks cannot be reordered
+The GripVertical icon is rendered in RoomCreatePage but is purely decorative. There is no drag-and-drop or up/down button to reorder blocks after adding them. A content manager who adds 8 blocks in the wrong order must delete and re-add from that point forward.
+
+---
+21. Room/Course/Problem IDs not copyable on detail pages
+The Room ID appears at the bottom of the detail page as read-only text. Phase 4's PersonDetailPage added clipboard copy buttons for IDs. Consistency with Phase 4 suggests the same pattern should be applied to all content entity IDs.
+
+---
+22. Estimated minutes on CourseDetailPage not aggregated
+CourseDetailPage shows total course.estimatedMinutes from the API, but this field is not always populated at creation. The room list already has room.estimatedMinutes on each CourseRoom. Summing these client-side as a fallback would give a more reliable total.
+
+---
+23. List page search input has no debounce
+RoomsPage, CoursesPage, and ProblemsPage all update search state on onChange. The q param is sent to the backend on every character change (since useInfiniteQuery re-runs when the query key changes). This is 3× worse than the search page issue because it's an infinite query, not a simple query. A 300ms debounce on the search inputs would reduce server load substantially.
+
+---
+Summary Table
+
+┌─────┬──────────────────────────────────────┬──────────────┬──────────────────────────────────────────────────────────────────────────┐
+│  #  │               Category               │   Severity   │                                 Location                                 │
+├─────┼──────────────────────────────────────┼──────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ 1   │ Route protection                     │ Critical     │ routes/index.tsx:102                                                     │
+├─────┼──────────────────────────────────────┼──────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ 2   │ Missing route                        │ Critical     │ RoomDetailPage.tsx:97 + router                                           │
+├─────┼──────────────────────────────────────┼──────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ 3   │ No search debounce                   │ Critical     │ SearchPage.tsx:80                                                        │
+├─────┼──────────────────────────────────────┼──────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ 4   │ Unstable React keys                  │ Critical     │ BlockRenderer.tsx:177                                                    │
+├─────┼──────────────────────────────────────┼──────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ 5   │ Empty string IDs in hooks            │ Critical     │ RoomDetailPage.tsx:38, ProblemDetailPage.tsx:23, CourseDetailPage.tsx:20 │
+├─────┼──────────────────────────────────────┼──────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ 6   │ Partial problem on test case failure │ Critical     │ ProblemCreatePage.tsx:65                                                 │
+├─────┼──────────────────────────────────────┼──────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ 7   │ Default status filter                │ Recommended  │ RoomsPage.tsx, ProblemsPage.tsx                                          │
+├─────┼──────────────────────────────────────┼──────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ 8   │ Missing review filter                │ Recommended  │ CoursesPage.tsx                                                          │
+├─────┼──────────────────────────────────────┼──────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ 9   │ Missing aria-label                   │ Recommended  │ All list pages, RoomDetailPage                                           │
+├─────┼──────────────────────────────────────┼──────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ 10  │ Cards not keyboard-accessible        │ Recommended  │ All list pages                                                           │
+├─────┼──────────────────────────────────────┼──────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ 11  │ Upload zone not keyboard-accessible  │ Recommended  │ MediaUploader.tsx                                                        │
+├─────┼──────────────────────────────────────┼──────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ 12  │ Decorative icons not hidden from AT  │ Recommended  │ BlockRenderer.tsx                                                        │
+├─────┼──────────────────────────────────────┼──────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ 13  │ Dead prose class                     │ Recommended  │ RoomDetailPage.tsx:174                                                   │
+├─────┼──────────────────────────────────────┼──────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ 14  │ Markdown not rendered                │ Recommended  │ ProblemDetailPage.tsx                                                    │
+├─────┼──────────────────────────────────────┼──────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ 15  │ Stale invalidate closure             │ Recommended  │ useRooms.ts:56                                                           │
+├─────┼──────────────────────────────────────┼──────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ 16  │ No optimistic update after lifecycle │ Recommended  │ useRooms.ts                                                              │
+├─────┼──────────────────────────────────────┼──────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ 17  │ Unused command palette               │ Nice to have │ —                                                                        │
+├─────┼──────────────────────────────────────┼──────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ 18  │ No breadcrumbs                       │ Nice to have │ All content detail pages                                                 │
+├─────┼──────────────────────────────────────┼──────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ 19  │ No total count                       │ Nice to have │ All list pages                                                           │
+├─────┼──────────────────────────────────────┼──────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ 20  │ Blocks not reorderable               │ Nice to have │ RoomCreatePage.tsx                                                       │
+├─────┼──────────────────────────────────────┼──────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ 21  │ ID not copyable                      │ Nice to have │ All detail pages                                                         │
+├─────┼──────────────────────────────────────┼──────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ 22  │ Course minutes not summed            │ Nice to have │ CourseDetailPage.tsx                                                     │
+├─────┼──────────────────────────────────────┼──────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ 23  │ List search not debounced            │ Nice to have │ All list pages                                                           │
+└─────┴──────────────────────────────────────┴──────────────┴──────────────────────────────────────────────────────────────────────────┘
+
+✻ Crunched for 3m 40s
+
+──────────────────────────────────────────────────────────────────────────────────────────── 1 new message ─────────────────────────────────────────────────────────────────────────────────────────────
+
+※ recap: Building the Dezolver LMS frontend. Phases 1–5 are complete covering auth, app shell, tenant management, and content catalog. Next: fix the 6 critical audit issues before starting Phase 6 Assessments.
+                                                                                                                                                                        copied 19343 chars to clipboard
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────
+
+
+
+============================================================
+
+---
+Remediation Complete
+
+Build: ✅ TypeScript clean, Vite builds in 4.68s, zero errors
+
+---
+Files Modified
+
+┌──────────────────────────────────────────────┬────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                     File                     │                                              Fix                                               │
+├──────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ hooks/useDebounce.ts                         │ NEW — debounce utility                                                                         │
+├──────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ components/content/BlockEditor.tsx           │ NEW — shared editor with stable _editorKey on every block                                      │
+├──────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ pages/content/rooms/RoomEditPage.tsx         │ NEW — complete edit workflow                                                                   │
+├──────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ hooks/useRooms.ts                            │ Fix #4 + #5 — useUpdateRoom updated; useRoomLifecycle no longer captures IDs at hook-call time │
+├──────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ hooks/useProblems.ts                         │ Fix #5 — usePublishProblem receives IDs at mutateAsync() call-time                             │
+├──────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ hooks/useCourses.ts                          │ Fix #5 — useRemoveRoomFromCourse receives both IDs at mutateAsync() call-time                  │
+├──────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ pages/content/rooms/RoomCreatePage.tsx       │ Fix #4 — delegates to shared BlockEditor; exports TagInput for RoomEditPage                    │
+├──────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ pages/content/rooms/RoomDetailPage.tsx       │ Fix #5 — all lifecycle calls pass { id, slug }                                                 │
+├──────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ pages/content/courses/CourseDetailPage.tsx   │ Fix #5 — remove-room call passes { courseId, roomId }                                          │
+├──────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ pages/content/problems/ProblemDetailPage.tsx │ Fix #5 — publish call passes { problemId, slug }                                               │
+├──────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ pages/content/problems/ProblemCreatePage.tsx │ Fix #6 — two-phase error handling; problem and test case failures reported separately          │
+├──────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ pages/content/rooms/RoomsPage.tsx            │ Fix #3 — 350ms debounce on search input                                                        │
+├──────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ pages/content/courses/CoursesPage.tsx        │ Fix #3 — 350ms debounce                                                                        │
+├──────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ pages/content/problems/ProblemsPage.tsx      │ Fix #3 — 350ms debounce                                                                        │
+├──────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ pages/content/search/SearchPage.tsx          │ Fix #3 — 350ms debounce; query used for display, debouncedQuery sent to API                    │
+├──────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ routes/index.tsx                             │ Fix #1 — RoleGate wraps all authoring routes; Fix #2 — rooms/:slug/edit registered             │
+└──────────────────────────────────────────────┴────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+---
+Fix Verification
+
+#1 — Route protection
+The authoring sub-tree uses a pathless layout route with RoleGate roles={['content_manager', 'platform_admin']}. Any other authenticated role navigating to /content/rooms/create, /content/courses/create, /content/problems/create, or /content/rooms/:slug/edit is redirected to /unauthorized. The catalog read-only routes remain open to all authenticated users.
+
+#2 — Edit workflow
+RoomEditPage loads room data via useRoom(slug), populates the form via useEffect with form.reset(), uses the shared BlockEditor (with wrapAllWithKeys to give existing blocks stable keys), and saves via useUpdateRoom({ id, dto }). The "Edit" button in RoomDetailPage now resolves to a registered route. Non-draft rooms show a status guard screen rather than allowing edits.
+
+#3 — Search debounce
+All four search inputs debounce at 350ms using the useDebounce hook. The raw search/query state updates immediately (for the input display), while the debounced value is what drives the query key. Zero API calls fire while the user is mid-keystroke.
+
+#4 — Stable React keys
+BlockEditor defines EditorBlock = ContentBlock & { _editorKey: string }. Keys are generated with crypto.randomUUID() at block creation time and are preserved through any number of updates, additions, and removals. React reconciles by key, not index. stripEditorKeys() removes _editorKey before the payload goes to the API. The type is local to BlockEditor.tsx — ContentBlock in content.types.ts is unchanged.
+
+#5 — No empty-string IDs in mutation closures
+All three hooks changed: useRoomLifecycle mutations receive { id, slug } as the mutation variable; usePublishProblem receives { problemId, slug }; useRemoveRoomFromCourse receives { courseId, roomId }. The hooks no longer close over any ID — there is no constructor parameter to pass an empty string to. Malformed URLs like /rooms//approve are now impossible.
+
+#6 — Orphaned problem creation
+onSubmit is split into two phases with a hard return between them. If createProblem fails, the user sees "Failed to create problem. Nothing was saved." and stays on the form. If createProblem succeeds but some addTestCase calls fail, the user is navigated to the newly-created problem detail page with a toast.warning listing which test case numbers failed and the problem ID — ensuring they can never believe nothing was created when a draft problem actually exists.
+
+---
+Remaining Recommended Issues (7–16)
+
+Still open from the audit, in priority order:
+
+┌─────┬────────────────────────────────────────────────────────────────────────────────┬─────────┐
+│  #  │                                     Issue                                      │ Effort  │
+├─────┼────────────────────────────────────────────────────────────────────────────────┼─────────┤
+│ 7   │ Default status filter should be role-aware (students see published by default) │ Small   │
+├─────┼────────────────────────────────────────────────────────────────────────────────┼─────────┤
+│ 8   │ CoursesPage is missing the review status option                                │ Trivial │
+├─────┼────────────────────────────────────────────────────────────────────────────────┼─────────┤
+│ 9   │ Icon-only buttons missing aria-label                                           │ Trivial │
+├─────┼────────────────────────────────────────────────────────────────────────────────┼─────────┤
+│ 10  │ Clickable cards (divs with onClick) not keyboard-accessible                    │ Small   │
+├─────┼────────────────────────────────────────────────────────────────────────────────┼─────────┤
+│ 11  │ MediaUploader drop zone not keyboard-accessible                                │ Small   │
+├─────┼────────────────────────────────────────────────────────────────────────────────┼─────────┤
+│ 12  │ Callout emoji icons need aria-hidden="true"                                    │ Trivial │
+├─────┼────────────────────────────────────────────────────────────────────────────────┼─────────┤
+│ 13  │ Dead prose prose-sm class (no typography plugin)                               │ Trivial │
+├─────┼────────────────────────────────────────────────────────────────────────────────┼─────────┤
+│ 14  │ Problem statement rendered as raw Markdown text in <pre>, not rendered         │ Medium  │
+├─────┼────────────────────────────────────────────────────────────────────────────────┼─────────┤
+│ 15  │ invalidate closure in useRoomLifecycle should use useCallback                  │ Small   │
+├─────┼────────────────────────────────────────────────────────────────────────────────┼─────────┤
+│ 16  │ No optimistic update after lifecycle actions (brief flash)                     │ Medium  │
+└─────┴────────────────────────────────────────────────────────────────────────────────┴─────────┘
+
+Remaining Nice-to-Have Issues (17–23)
+
+┌─────┬─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│  #  │                                                                  Issue                                                                  │
+├─────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ 17  │ Unused command.tsx — global Cmd+K palette                                                                                               │
+├─────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ 18  │ No breadcrumbs on detail pages                                                                                                          │
+├─────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ 19  │ No total item count on list pages                                                                                                       │
+├─────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ 20  │ Blocks not reorderable in BlockEditor                                                                                                   │
+├─────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ 21  │ Entity IDs not copyable on detail pages                                                                                                 │
+├─────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ 22  │ Course estimated minutes not summed from rooms as fallback                                                                              │
+├─────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ 23  │ useAddRoomToCourse hook signature also changed — call sites should pass { courseId, roomId, position } (already fixed in useCourses.ts) │
+└─────┴─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+✻ Cooked for 10m 36s
+=====================================================================================
+
+
+
+-
+Phase 6: Assessments & Judge — Complete
+
+Build Verification
+
+TypeScript:  ✅ Clean (npx tsc --noEmit — no output)
+Build:       ✅ Success (vite build — 2258 modules, 3.73s)
+
+---
+APIs Integrated
+
+┌────────┬────────────────────────────────────────┬────────────────────────────────────────┐
+│ Method │                Endpoint                │                 Usage                  │
+├────────┼────────────────────────────────────────┼────────────────────────────────────────┤
+│ GET    │ /api/v1/assessments                    │ List assessments (paginated, filtered) │
+├────────┼────────────────────────────────────────┼────────────────────────────────────────┤
+│ GET    │ /api/v1/assessments/:id                │ Assessment detail with problem         │
+├────────┼────────────────────────────────────────┼────────────────────────────────────────┤
+│ POST   │ /api/v1/assessments                    │ Create assessment                      │
+├────────┼────────────────────────────────────────┼────────────────────────────────────────┤
+│ PATCH  │ /api/v1/assessments/:id                │ Update assessment                      │
+├────────┼────────────────────────────────────────┼────────────────────────────────────────┤
+│ POST   │ /api/v1/assessments/:id/submissions    │ Submit code (returns 202)              │
+├────────┼────────────────────────────────────────┼────────────────────────────────────────┤
+│ GET    │ /api/v1/submissions/:id                │ Submission detail / poll               │
+├────────┼────────────────────────────────────────┼────────────────────────────────────────┤
+│ GET    │ /api/v1/me/submissions                 │ My submission history                  │
+├────────┼────────────────────────────────────────┼────────────────────────────────────────┤
+│ POST   │ /api/v1/submissions/:id/rerun          │ Faculty rerun                          │
+├────────┼────────────────────────────────────────┼────────────────────────────────────────┤
+│ GET    │ /api/v1/submissions/:id/judge-run      │ Raw Judge0 result                      │
+├────────┼────────────────────────────────────────┼────────────────────────────────────────┤
+│ GET    │ /api/v1/submissions/flagged            │ Anti-cheat queue                       │
+├────────┼────────────────────────────────────────┼────────────────────────────────────────┤
+│ POST   │ /api/v1/submissions/:id/review-flagged │ Review flagged submission              │
+└────────┴────────────────────────────────────────┴────────────────────────────────────────┘
+
+---
+Routes Added
+
+┌───────────────────────┬─────────────────────────┬──────────────────────────────────────────────────────────────────┐
+│         Route         │        Component        │                              Access                              │
+├───────────────────────┼─────────────────────────┼──────────────────────────────────────────────────────────────────┤
+│ /assessments          │ AssessmentsPage         │ All authenticated                                                │
+├───────────────────────┼─────────────────────────┼──────────────────────────────────────────────────────────────────┤
+│ /assessments/create   │ AssessmentCreatePage    │ faculty/coordinator/college_admin/content_manager/platform_admin │
+├───────────────────────┼─────────────────────────┼──────────────────────────────────────────────────────────────────┤
+│ /assessments/:id      │ AssessmentDetailPage    │ All authenticated                                                │
+├───────────────────────┼─────────────────────────┼──────────────────────────────────────────────────────────────────┤
+│ /assessments/:id/edit │ AssessmentEditPage      │ Same authoring roles                                             │
+├───────────────────────┼─────────────────────────┼──────────────────────────────────────────────────────────────────┤
+│ /assessments/:id/take │ AssessmentWorkspacePage │ All authenticated                                                │
+├───────────────────────┼─────────────────────────┼──────────────────────────────────────────────────────────────────┤
+│ /submissions          │ SubmissionsPage         │ All authenticated                                                │
+├───────────────────────┼─────────────────────────┼──────────────────────────────────────────────────────────────────┤
+│ /submissions/flagged  │ FlaggedSubmissionsPage  │ faculty/college_admin/platform_admin                             │
+├───────────────────────┼─────────────────────────┼──────────────────────────────────────────────────────────────────┤
+│ /submissions/:id      │ SubmissionDetailPage    │ All authenticated                                                │
+└───────────────────────┴─────────────────────────┴──────────────────────────────────────────────────────────────────┘
+
+---
+Components Created
+
+New (Phase 6):
+- AssessmentCard — card view of an assessment
+- AssessmentTable — table row view
+- AssessmentFilters — status/kind filter selects
+- LanguageSelector — language picker dropdown
+- ProblemPanel — full problem statement panel (used in workspace)
+- ProblemHeader — problem title + difficulty + constraints strip
+- ProblemExamples — sample test case I/O display
+- SubmissionPanel — verdict panel wrapper
+- SubmissionTable — submission list table
+- SubmissionCard — compact submission card
+- JudgeRunCard — raw judge run card (faculty view)
+- JudgeResultPanel — JSON dump of judge result
+- ActivityFlagBadge — flag status/suspicion badge
+- FlaggedSubmissionTable — flagged submission list with review button
+
+Previously built (phases 1–5):
+- AssessmentStatusBadge, AssessmentTimer, CodeEditor, VerdictBadge, VerdictPanel
+
+---
+Hooks Created
+
+┌───────────────────────┬───────────────────────────────────────┐
+│         Hook          │              Description              │
+├───────────────────────┼───────────────────────────────────────┤
+│ useAssessments        │ Infinite query for assessment list    │
+├───────────────────────┼───────────────────────────────────────┤
+│ useAssessment         │ Single assessment detail              │
+├───────────────────────┼───────────────────────────────────────┤
+│ useCreateAssessment   │ Create mutation                       │
+├───────────────────────┼───────────────────────────────────────┤
+│ useUpdateAssessment   │ Update mutation with cache sync       │
+├───────────────────────┼───────────────────────────────────────┤
+│ useMySubmissions      │ Infinite query for submission history │
+├───────────────────────┼───────────────────────────────────────┤
+│ useSubmission         │ Single submission with poll support   │
+├───────────────────────┼───────────────────────────────────────┤
+│ useJudgeRun           │ Judge run detail (faculty/admin)      │
+├───────────────────────┼───────────────────────────────────────┤
+│ useSubmitCode         │ Submit code mutation (async 202)      │
+├───────────────────────┼───────────────────────────────────────┤
+│ useRerunSubmission    │ Faculty rerun mutation                │
+├───────────────────────┼───────────────────────────────────────┤
+│ useFlaggedSubmissions │ Infinite query for flagged queue      │
+├───────────────────────┼───────────────────────────────────────┤
+│ useReviewFlagged      │ Review flagged mutation               │
+├───────────────────────┼───────────────────────────────────────┤
+│ useSubmissionUpdates  │ WebSocket live verdict sync           │
+└───────────────────────┴───────────────────────────────────────┘
+
+---
+Services Created
+
+┌─────────────────────┬───────────────────────┐
+│       Service       │         File          │
+├─────────────────────┼───────────────────────┤
+│ Assessment CRUD     │ assessment.service.ts │
+├─────────────────────┼───────────────────────┤
+│ Submission pipeline │ submission.service.ts │
+├─────────────────────┼───────────────────────┤
+│ Judge run reads     │ judge.service.ts      │
+└─────────────────────┴───────────────────────┘
+
+---
+WebSocket Events
+
+┌──────────────────────┬────────────────────────────────────────────────────┐
+│        Event         │                      Handler                       │
+├──────────────────────┼────────────────────────────────────────────────────┤
+│ submission:queued    │ useSubmissionUpdates → cache update                │
+├──────────────────────┼────────────────────────────────────────────────────┤
+│ submission:executing │ useSubmissionUpdates → cache update                │
+├──────────────────────┼────────────────────────────────────────────────────┤
+│ submission:graded    │ useSubmissionUpdates → cache invalidate + callback │
+└──────────────────────┴────────────────────────────────────────────────────┘
+
+---
+Monaco Integration
+
+Monaco Editor (@monaco-editor/react) is implemented in CodeEditor.tsx with:
+- VS Dark theme
+- Language switching via language prop (maps SUPPORTED_LANGUAGES[n].monacoLang)
+- Paste event interception via editor.onDidPaste() for anti-cheat tracking
+- automaticLayout: true for responsive resizing
+- Bracket pair colorization, smooth scrolling, cursor blending
+
+---
+Assessment Timer Strategy
+
+Timer in AssessmentTimer.tsx and workspace:
+- Start time persisted to localStorage via lib/codeDrafts.ts:saveStartTime
+- Restored on page reload (loadStartTime) so refresh doesn't reset the clock
+- setInterval at 1s resolution counts down from timeLimitMinutes * 60 * 1000
+- Visual states: neutral → amber (< 5 min) → red (expired)
+- onExpired callback disables the submit button
+
+---
+Anti-Cheat Support (backend-exposed signals only)
+
+┌─────────────────┬───────────────────────────────────────┐
+│     Signal      │           Collection point            │
+├─────────────────┼───────────────────────────────────────┤
+│ timeOnTaskMs    │ Date.now() delta from workspace mount │
+├─────────────────┼───────────────────────────────────────┤
+│ pasteEventCount │ Monaco editor.onDidPaste()            │
+├─────────────────┼───────────────────────────────────────┤
+│ tabBlurCount    │ document.visibilitychange             │
+├─────────────────┼───────────────────────────────────────┤
+│ windowBlurCount │ window.blur                           │
+└─────────────────┴───────────────────────────────────────┘
+
+Signals are sent as clientMetadata on each code submission. Faculty/admin can view them in the Submission Detail → Anti-Cheat tab. No fabricated signals; only what the backend ClientMetadata schema exposes.
+
+---
+Query Strategy / Cache Keys
+
+┌──────────────────────────────────┬──────────────┬───────────────────────────────────────────────────────┐
+│               Key                │    Scope     │                    Invalidated by                     │
+├──────────────────────────────────┼──────────────┼───────────────────────────────────────────────────────┤
+│ ['assessments', params]          │ list         │ useCreateAssessment, useUpdateAssessment              │
+├──────────────────────────────────┼──────────────┼───────────────────────────────────────────────────────┤
+│ ['assessments', id]              │ detail       │ useUpdateAssessment (setQueryData)                    │
+├──────────────────────────────────┼──────────────┼───────────────────────────────────────────────────────┤
+│ ['submissions', 'mine', params]  │ list         │ useSubmitCode                                         │
+├──────────────────────────────────┼──────────────┼───────────────────────────────────────────────────────┤
+│ ['submissions', id]              │ detail       │ useSubmissionUpdates (WS → setQueryData + invalidate) │
+├──────────────────────────────────┼──────────────┼───────────────────────────────────────────────────────┤
+│ ['submissions', id, 'judge-run'] │ judge        │ stale 5 min                                           │
+├──────────────────────────────────┼──────────────┼───────────────────────────────────────────────────────┤
+│ ['flagged-submissions']          │ flagged list │ useReviewFlagged                                      │
+└──────────────────────────────────┴──────────────┴───────────────────────────────────────────────────────┘
+
+---
+Permission Matrix
+
+┌────────────────────────┬──────────────────────────────────────────────────┐
+│         Action         │               Permissions checked                │
+├────────────────────────┼──────────────────────────────────────────────────┤
+│ Create/edit assessment │ create:assessment / manage:assessment            │
+├────────────────────────┼──────────────────────────────────────────────────┤
+│ Submit code            │ create:submission                                │
+├────────────────────────┼──────────────────────────────────────────────────┤
+│ View submission detail │ view:submission                                  │
+├────────────────────────┼──────────────────────────────────────────────────┤
+│ Rerun submission       │ rerun:submission                                 │
+├────────────────────────┼──────────────────────────────────────────────────┤
+│ Review flagged         │ review:flagged-submission (route-level RoleGate) │
+├────────────────────────┼──────────────────────────────────────────────────┤
+│ View judge run         │ view:submission                                  │
+└────────────────────────┴──────────────────────────────────────────────────┘
+
+---
+Backend Limitations Documented
+
+1. Assessment schema lacks tenantId — All assessment list/detail endpoints may return cross-tenant data when the Prisma tenant filter middleware is eventually wired. UI renders whatever the backend returns; no frontend workaround attempted.
+  - UI impact: Assessment list may show assessments from other tenants until C2 fix is deployed.
+  - API impact: No tenantId filter can be passed to assessment endpoints.
+
+---
+Documentation/API Mismatches
+
+┌────────────────┬────────────────────────────────────────────┬───────────────────────────────────────────────────────┬──────────────────────────────────────────────────────────────────────────┐
+│  Spec source   │                  Expected                  │                 Actual (audit report)                 │                                  Impact                                  │
+├────────────────┼────────────────────────────────────────────┼───────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ Product doc    │ GET /api/v1/flagged-submissions            │ GET /api/v1/submissions/flagged                       │ Fixed in submission.service.ts                                           │
+│ §10            │                                            │                                                       │                                                                          │
+├────────────────┼────────────────────────────────────────────┼───────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ Product doc    │ POST                                       │ POST /api/v1/submissions/:id/review-flagged           │ Fixed in submission.service.ts                                           │
+│ §10            │ /api/v1/flagged-submissions/:id/review     │                                                       │                                                                          │
+├────────────────┼────────────────────────────────────────────┼───────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────┤
+│ Product doc    │ submission:graded WS event                 │ Backend also emits submission:updated (listed in      │ Hook listens to submission:graded, submission:executing,                 │
+│                │                                            │ spec)                                                 │ submission:queued                                                        │
+└────────────────┴────────────────────────────────────────────┴───────────────────────────────────────────────────────┴──────────────────────────────────────────────────────────────────────────┘
+
+---
+Technical Debt
+
+1. Kotlin template literal bug (pre-existing): assessment.types.ts had an unescaped backtick in the Kotlin starter template causing TS2322 — fixed in this phase.
+2. assessment.types.ts duplicate exports: PROBLEM_DIFFICULTY_LABELS was referenced in AssessmentDetailPage as if it came from assessment.types but actually lives in content.types — fixed.
+3. Chunk size warning: The single JS bundle is ~1.09MB (302KB gzipped). Route-level code splitting should be added in Phase 13 (Optimization).
+
+---
+Future Improvements
+
+1. Add route-level code splitting (React.lazy + Suspense) to reduce initial bundle
+2. Add MCQ/quiz submission UI (current workspace only handles coding problems)
+3. Implement problem selector dialog in AssessmentCreatePage instead of raw UUID input
+4. Add submission polling with exponential backoff as fallback when WebSocket is unavailable (current polling interval is a stub)
+5. Add keyboard shortcuts guide overlay in the workspace (Ctrl+Enter to submit, etc.)
+
+✻ Worked for 16m 44s
+
+※ recap: Phase 6 Assessments & Judge module is complete and building clean. All routes, components, services, hooks, and sidebar links are wired — next phase would be Learning Paths & Progress (Phase 7 per the blueprint). (disable recaps in /config)
+                                                                                                                                                                        copied 17738 chars to clipboard
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+──────────────────────────────
+
+
+
+
+
+
+
+
+
+===================================================================
+
+
+---
+Phase 7: Events & Competitions — Complete
+
+Build Verification
+
+TypeScript:  ✅ Clean (tsc --noEmit — zero errors)
+Build:       ✅ Success (2285 modules, 4.95s, 314KB gzip)
+
+---
+APIs Integrated
+
+┌────────┬─────────────────────────────────────┬─────────────────────────────────────────────────────────┐
+│ Method │              Endpoint               │                          Usage                          │
+├────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ GET    │ /api/v1/events                      │ List events (kind, status, audienceScope, date filters) │
+├────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ GET    │ /api/v1/events/:id                  │ Event detail + my registration state                    │
+├────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ POST   │ /api/v1/events                      │ Create event                                            │
+├────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ PATCH  │ /api/v1/events/:id                  │ Update draft event                                      │
+├────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ POST   │ /api/v1/events/:id/publish          │ Publish event                                           │
+├────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ POST   │ /api/v1/events/:id/cancel           │ Cancel event                                            │
+├────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ POST   │ /api/v1/events/:id/extend           │ Extend event (audited)                                  │
+├────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ POST   │ /api/v1/events/:id/registrations    │ Register (free or paid)                                 │
+├────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ DELETE │ /api/v1/events/:id/registrations/me │ Withdraw registration                                   │
+├────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ GET    │ /api/v1/events/:id/registrations    │ Organizer roster                                        │
+├────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ POST   │ /api/v1/events/:id/submissions      │ Competition submission (202)                            │
+├────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ GET    │ /api/v1/events/:id/leaderboard      │ Live/final leaderboard                                  │
+├────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ GET    │ /api/v1/events/:id/me/standing      │ My standing                                             │
+├────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ GET    │ /api/v1/time                        │ Server time sync for countdown                          │
+├────────┼─────────────────────────────────────┼─────────────────────────────────────────────────────────┤
+│ GET    │ /api/v1/leaderboard/global          │ PlatformRating top-N                                    │
+└────────┴─────────────────────────────────────┴─────────────────────────────────────────────────────────┘
+
+---
+Routes Added
+
+┌─────────────────────────┬───────────────────────┬───────────────────────────────────────────────────┐
+│          Route          │       Component       │                      Access                       │
+├─────────────────────────┼───────────────────────┼───────────────────────────────────────────────────┤
+│ /events                 │ EventsPage            │ All authenticated                                 │
+├─────────────────────────┼───────────────────────┼───────────────────────────────────────────────────┤
+│ /events/create          │ EventCreatePage       │ faculty/coordinator/college_admin/platform_admin  │
+├─────────────────────────┼───────────────────────┼───────────────────────────────────────────────────┤
+│ /events/:id             │ EventDetailPage       │ All authenticated                                 │
+├─────────────────────────┼───────────────────────┼───────────────────────────────────────────────────┤
+│ /events/:id/edit        │ EventEditPage         │ Same authoring roles                              │
+├─────────────────────────┼───────────────────────┼───────────────────────────────────────────────────┤
+│ /events/:id/live        │ EventLivePage         │ All authenticated (backend enforces registration) │
+├─────────────────────────┼───────────────────────┼───────────────────────────────────────────────────┤
+│ /events/:id/leaderboard │ EventLeaderboardPage  │ All authenticated                                 │
+├─────────────────────────┼───────────────────────┼───────────────────────────────────────────────────┤
+│ /events/:id/results     │ EventResultsPage      │ All authenticated                                 │
+├─────────────────────────┼───────────────────────┼───────────────────────────────────────────────────┤
+│ /events/:id/manage      │ EventManagePage       │ faculty/coordinator/college_admin/platform_admin  │
+├─────────────────────────┼───────────────────────┼───────────────────────────────────────────────────┤
+│ /leaderboard            │ GlobalLeaderboardPage │ All authenticated                                 │
+└─────────────────────────┴───────────────────────┴───────────────────────────────────────────────────┘
+
+---
+Components Created
+
+- EventStatusBadge — animated "LIVE" indicator for live events
+- EventTypeBadge — workshop/competition colored badge
+- RegistrationStatusBadge — registration status
+- EventCard — grid card with countdown and registration state
+- EventTable — list table
+- EventCountdown — server-synced countdown (takes UTC targetDate, optional serverTimeOffsetMs)
+- EventActionMenu — dropdown for publish/extend/cancel/manage
+- LeaderboardRow — medal ranks for top 3, "You" indicator
+- LeaderboardTable — ICPC-style table with time penalty column
+- EventResultsTable — final results table with "You" highlight
+- ParticipantTable — organizer roster view
+
+---
+Hooks Created
+
+┌─────────────────────────────────────────────────────────────────────────────────┬─────────────────────────────────────┐
+│                                      Hook                                       │               Source                │
+├─────────────────────────────────────────────────────────────────────────────────┼─────────────────────────────────────┤
+│ useEvents                                                                       │ Infinite query                      │
+├─────────────────────────────────────────────────────────────────────────────────┼─────────────────────────────────────┤
+│ useEvent                                                                        │ Single detail                       │
+├─────────────────────────────────────────────────────────────────────────────────┼─────────────────────────────────────┤
+│ useCreateEvent, useUpdateEvent, usePublishEvent, useCancelEvent, useExtendEvent │ Mutations                           │
+├─────────────────────────────────────────────────────────────────────────────────┼─────────────────────────────────────┤
+│ useServerTime                                                                   │ Server clock sync                   │
+├─────────────────────────────────────────────────────────────────────────────────┼─────────────────────────────────────┤
+│ useRegisterEvent, useUnregisterEvent                                            │ Registration mutations              │
+├─────────────────────────────────────────────────────────────────────────────────┼─────────────────────────────────────┤
+│ useEventParticipants, useMyRegistration                                         │ Registration queries                │
+├─────────────────────────────────────────────────────────────────────────────────┼─────────────────────────────────────┤
+│ useEventLeaderboard, useMyStanding, useEventResults                             │ Leaderboard queries                 │
+├─────────────────────────────────────────────────────────────────────────────────┼─────────────────────────────────────┤
+│ useGlobalLeaderboard                                                            │ Global rating query                 │
+├─────────────────────────────────────────────────────────────────────────────────┼─────────────────────────────────────┤
+│ useLeaderboardUpdates                                                           │ WS leaderboard:updated → cache sync │
+└─────────────────────────────────────────────────────────────────────────────────┴─────────────────────────────────────┘
+
+---
+Services Created
+
+┌────────────────────────────────┬─────────────────────────┐
+│            Service             │          File           │
+├────────────────────────────────┼─────────────────────────┤
+│ Event CRUD + lifecycle         │ event.service.ts        │
+├────────────────────────────────┼─────────────────────────┤
+│ Registration + roster          │ registration.service.ts │
+├────────────────────────────────┼─────────────────────────┤
+│ Leaderboard + results + global │ leaderboard.service.ts  │
+└────────────────────────────────┴─────────────────────────┘
+
+---
+WebSocket Events Integrated
+
+┌─────────────────────┬────────────────────────────────────────────────────────┐
+│        Event        │                        Handler                         │
+├─────────────────────┼────────────────────────────────────────────────────────┤
+│ leaderboard:updated │ useLeaderboardUpdates → replace top-N entries in cache │
+├─────────────────────┼────────────────────────────────────────────────────────┤
+│ event:started       │ WebSocketProvider → success toast                      │
+├─────────────────────┼────────────────────────────────────────────────────────┤
+│ event:ended         │ WebSocketProvider → info toast                         │
+├─────────────────────┼────────────────────────────────────────────────────────┤
+│ event:extended      │ WebSocketProvider → info toast                         │
+├─────────────────────┼────────────────────────────────────────────────────────┤
+│ event:reminder      │ WebSocketProvider → info toast with minutes            │
+├─────────────────────┼────────────────────────────────────────────────────────┤
+│ event:announcement  │ WebSocketProvider → info toast                         │
+└─────────────────────┴────────────────────────────────────────────────────────┘
+
+EventLivePage subscribes to event:{id} and event:{id}/leaderboard channels on mount and leaves on unmount.
+
+---
+Backend Limitations Documented
+
+1. Paid Registration (Billing stub)
+
+Impact: POST /events/:id/registrations may return status: 'pending_payment' with Razorpay order details.
+Current behavior: Backend's EventRegistrationPaidConsumer depends on EventRegistrationPaid event from Billing. The billing webhook (handleSubscriptionCharged) is a stub — event orders may not be confirmed automatically.
+UI treatment: Shows a clear amber notice: "Payment processing requires backend billing to be operational."
+
+2. PlatformRating Global Leaderboard
+
+Impact: Only applies after platform-scope or tenant_open-external competitions complete grading.
+UI treatment: Shows an amber information card explaining when ratings are applied and that data is reconciled hourly.
+
+3. Event Tenant Isolation
+
+Impact: Backend audit noted events.service.ts has no tenantId filter in some queries.
+UI treatment: Renders whatever the backend returns; no frontend workaround.
+
+---
+Documentation/API Mismatches
+
+None found — event endpoints match documentation exactly.
+
+---
+Technical Debt
+
+1. Competition workspace problem detail — EventLivePage shows problem title only (no full statement). A dedicated problem detail panel would require fetching individual problems via GET /problems/:slug. Currently shows the problem identifier from the event config; a future improvement could fetch and display the full problem statement.
+2. Extend event dialog uses datetime-local input which gives local time, then converts to ISO. Time zone display may confuse users in non-IST environments; should display current event end time in the extend dialog.
+3. Bundle size — 1.15MB unminified (314KB gzip). Code splitting via React.lazy is deferred to Phase 13.
+
+✻ Baked for 18m 45s
+
+
+
+
+
+
+
+
+
+
+========================================================================================================
+
+  Wrote 1 memory
+
+---
+Phase 8: Credentials & Certificates — Complete
+
+Build Verification
+
+TypeScript:  ✅ Clean (tsc --noEmit — zero errors)
+Build:       ✅ Success (2308 modules, 3.41s, 323KB gzip)
+
+---
+APIs Integrated
+
+┌────────┬─────────────────────────────────────────────────┬──────────────────────────────────┐
+│ Method │                    Endpoint                     │              Usage               │
+├────────┼─────────────────────────────────────────────────┼──────────────────────────────────┤
+│ GET    │ /api/v1/me/certificates                         │ My certificate list (paginated)  │
+├────────┼─────────────────────────────────────────────────┼──────────────────────────────────┤
+│ GET    │ /api/v1/me/certificates/:certificateId          │ Certificate detail               │
+├────────┼─────────────────────────────────────────────────┼──────────────────────────────────┤
+│ GET    │ /api/v1/me/certificates/:certificateId/download │ Download (blob via axios)        │
+├────────┼─────────────────────────────────────────────────┼──────────────────────────────────┤
+│ PATCH  │ /api/v1/me/certificates/:certificateId          │ Toggle isPublic                  │
+├────────┼─────────────────────────────────────────────────┼──────────────────────────────────┤
+│ GET    │ /api/v1/verify/c/:certificateId                 │ Public verification (no auth)    │
+├────────┼─────────────────────────────────────────────────┼──────────────────────────────────┤
+│ GET    │ /api/v1/certificate-templates                   │ List templates (REST convention) │
+├────────┼─────────────────────────────────────────────────┼──────────────────────────────────┤
+│ GET    │ /api/v1/certificate-templates/:id               │ Template detail                  │
+├────────┼─────────────────────────────────────────────────┼──────────────────────────────────┤
+│ POST   │ /api/v1/certificate-templates                   │ Create template                  │
+├────────┼─────────────────────────────────────────────────┼──────────────────────────────────┤
+│ PATCH  │ /api/v1/certificate-templates/:id               │ Update template                  │
+├────────┼─────────────────────────────────────────────────┼──────────────────────────────────┤
+│ POST   │ /api/v1/certificate-templates/:id/preview       │ Generate preview PDF             │
+├────────┼─────────────────────────────────────────────────┼──────────────────────────────────┤
+│ POST   │ /api/v1/certificate-templates/:id/publish       │ Activate template                │
+├────────┼─────────────────────────────────────────────────┼──────────────────────────────────┤
+│ GET    │ /api/v1/issuance-rules                          │ List rules                       │
+├────────┼─────────────────────────────────────────────────┼──────────────────────────────────┤
+│ POST   │ /api/v1/issuance-rules                          │ Create rule                      │
+├────────┼─────────────────────────────────────────────────┼──────────────────────────────────┤
+│ DELETE │ /api/v1/issuance-rules/:id                      │ Deactivate rule                  │
+├────────┼─────────────────────────────────────────────────┼──────────────────────────────────┤
+│ GET    │ /api/v1/certificates                            │ Admin list (REST convention)     │
+├────────┼─────────────────────────────────────────────────┼──────────────────────────────────┤
+│ POST   │ /api/v1/certificates/:id/revoke                 │ Revoke certificate               │
+├────────┼─────────────────────────────────────────────────┼──────────────────────────────────┤
+│ POST   │ /api/v1/certificates/:id/reissue                │ Reissue certificate              │
+├────────┼─────────────────────────────────────────────────┼──────────────────────────────────┤
+│ POST   │ /api/v1/certificates/manual                     │ Manual issuance (platform-admin) │
+└────────┴─────────────────────────────────────────────────┴──────────────────────────────────┘
+
+---
+Routes Added
+
+┌──────────────────────────────────────────┬───────────────────────────────┬────────────────────────────────────────────────┐
+│                  Route                   │           Component           │                     Access                     │
+├──────────────────────────────────────────┼───────────────────────────────┼────────────────────────────────────────────────┤
+│ /verify/c/:id                            │ PublicVerificationPage        │ Public — no auth                               │
+├──────────────────────────────────────────┼───────────────────────────────┼────────────────────────────────────────────────┤
+│ /me/certificates                         │ MyCertificatesPage            │ All authenticated                              │
+├──────────────────────────────────────────┼───────────────────────────────┼────────────────────────────────────────────────┤
+│ /me/certificates/:id                     │ CertificateDetailPage         │ All authenticated                              │
+├──────────────────────────────────────────┼───────────────────────────────┼────────────────────────────────────────────────┤
+│ /platform/credentials                    │ CertificatesAdminPage         │ college_admin, platform_admin                  │
+├──────────────────────────────────────────┼───────────────────────────────┼────────────────────────────────────────────────┤
+│ /platform/credentials/templates          │ CertificateTemplatesPage      │ content_manager, college_admin, platform_admin │
+├──────────────────────────────────────────┼───────────────────────────────┼────────────────────────────────────────────────┤
+│ /platform/credentials/templates/new      │ CertificateTemplateEditorPage │ same                                           │
+├──────────────────────────────────────────┼───────────────────────────────┼────────────────────────────────────────────────┤
+│ /platform/credentials/templates/:id/edit │ CertificateTemplateEditorPage │ same                                           │
+├──────────────────────────────────────────┼───────────────────────────────┼────────────────────────────────────────────────┤
+│ /platform/credentials/rules              │ IssuanceRulesPage             │ same                                           │
+└──────────────────────────────────────────┴───────────────────────────────┴────────────────────────────────────────────────┘
+
+---
+Components Created
+
+- CertificateStatusBadge — pending/issued/revoked/failed with spinner for pending
+- VerificationStatusBadge — valid/revoked/private/not_found with icons
+- CertificateCard — decorative gradient band, download button, privacy eye indicator
+- CertificateTable — with admin revoke/reissue actions
+- CertificatePreview — frontend-rendered visual (not PDF); decorative corners matching certificate aesthetics
+- CertificateDownloadButton — blob download via axios
+- CertificateTemplateEditor — tabbed Monaco (HTML/CSS) + iframe preview + variable reference with click-to-copy
+- CertificateTemplatePreview — sandboxed iframe renders HTML + CSS in A4 aspect ratio
+- IssuanceRuleTable — rule list with deactivate button
+- CertificateActionMenu — revoke/reissue dropdown
+
+---
+Hooks Created
+
+┌────────────────────────────────────────────────────────────┬───────────────────────────────────────────────────┐
+│                            Hook                            │                    Description                    │
+├────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────┤
+│ useMyCertificates                                          │ Infinite query for my certificate list            │
+├────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────┤
+│ useCertificate                                             │ Single certificate detail                         │
+├────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────┤
+│ useVerifyCertificate                                       │ Public verification query (no auth, retry: false) │
+├────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────┤
+│ useToggleCertificatePrivacy                                │ PATCH privacy mutation                            │
+├────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────┤
+│ useDownloadCertificate                                     │ Blob download mutation                            │
+├────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────┤
+│ useAllCertificates                                         │ Admin infinite query                              │
+├────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────┤
+│ useRevokeCertificate                                       │ Revoke mutation                                   │
+├────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────┤
+│ useReissueCertificate                                      │ Reissue mutation                                  │
+├────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────┤
+│ useManualIssueCertificate                                  │ Manual issue mutation                             │
+├────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────┤
+│ useCertificateUpdates                                      │ WS certificate:issued → list cache invalidation   │
+├────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────┤
+│ useCertificateTemplates                                    │ Infinite query for templates                      │
+├────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────┤
+│ useCertificateTemplate                                     │ Single template                                   │
+├────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────┤
+│ useCreateCertificateTemplate, useUpdateCertificateTemplate │ Create/update mutations                           │
+├────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────┤
+│ usePreviewTemplate                                         │ Preview PDF mutation                              │
+├────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────┤
+│ usePublishTemplate                                         │ Publish mutation                                  │
+├────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────┤
+│ useIssuanceRules                                           │ Rules query                                       │
+├────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────┤
+│ useCreateIssuanceRule, useDeactivateIssuanceRule           │ Rule mutations                                    │
+└────────────────────────────────────────────────────────────┴───────────────────────────────────────────────────┘
+
+---
+WebSocket Events Integrated
+
+┌─────────────────────┬─────────────────────────────────────────────────────────────────────────────────┐
+│        Event        │                                     Handler                                     │
+├─────────────────────┼─────────────────────────────────────────────────────────────────────────────────┤
+│ certificate:issued  │ WebSocketProvider → success toast + query invalidation in useCertificateUpdates │
+├─────────────────────┼─────────────────────────────────────────────────────────────────────────────────┤
+│ certificate:issuing │ WebSocketProvider → info toast                                                  │
+└─────────────────────┴─────────────────────────────────────────────────────────────────────────────────┘
+
+---
+Backend Limitations Documented
+
+1. Certificate Generator Produces HTML, Not PDF
+
+Audit finding: cert generator saves HTML not PDF (uses S3 not Puppeteer despite Dockerfile having Chromium)
+Impact: The download endpoint returns HTML-backed content even with a .pdf filename.
+UI treatment: CertificateDetailPage shows an amber notice. CertificateDownloadButton names the file .pdf but backend content may be HTML. Admin page shows this in the limitations notice.
+
+2. Reissue Does Not Revoke Old Certificate
+
+Audit finding: reissueCertificate does not revoke old cert
+Impact: Calling /certificates/:id/reissue creates a new certificate generation job but the old issued record remains valid. Multiple active versions may temporarily coexist.
+UI treatment: Admin page shows warning. Frontend renders backend state as-is; no frontend workaround attempted.
+
+3. Tenant Ownership Check Insufficient
+
+Audit finding: tenant ownership check insufficient (line 186-188)
+Impact: Admin revoke/reissue may allow cross-tenant operations.
+UI treatment: Frontend renders backend responses as provided; no tenant filtering added.
+
+---
+Documentation/API Mismatches
+
+┌───────────┬─────────────────────────────────────────────────┬───────────────────────────────────────────────────────────────────────────────────┐
+│   Spec    │                    Expected                     │                                      Status                                       │
+├───────────┼─────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────┤
+│ Blueprint │ GET /api/v1/certificate-templates list endpoint │ Assumed from REST convention; not explicitly listed — will 404 if not implemented │
+├───────────┼─────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────┤
+│ Blueprint │ GET /api/v1/certificates admin list endpoint    │ Same assumption — marked in admin page with empty state + retry                   │
+├───────────┼─────────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────┤
+│ Blueprint │ PATCH /api/v1/certificate-templates/:id update  │ Not listed explicitly; REST convention assumed                                    │
+└───────────┴─────────────────────────────────────────────────┴───────────────────────────────────────────────────────────────────────────────────┘
+
+---
+Audit Requirements Verification
+
+1. ✅ Public verification route — /verify/c/:id is registered outside AuthGuard, no authentication required
+2. ✅ Download action — calls GET /me/certificates/:id/download with auth token via axios blob response
+3. ✅ Reissue flow — backend state rendered as-is; limitation notice shown
+4. ✅ Revoked certificates — CertificateStatusBadge shows strikethrough + red color; verify page shows revocation state
+5. ✅ Template variables — TEMPLATE_VARIABLES constant lists only backend-documented variables; editor shows reference guide
+6. ✅ WS cache sync — useCertificateUpdates invalidates MY_CERTIFICATES on certificate:issued
+7. ✅ Admin routes protected — /platform/credentials/* wrapped in RoleGate with appropriate roles
+8. ✅ No mocked data — all pages use real API services; no hardcoded certificate objects
+
+---
+Technical Debt
+
+1. Certificate template update endpoint — PATCH /api/v1/certificate-templates/:id follows REST convention but is not explicitly in the API spec. If the backend requires a different path (e.g., a separate "save draft" endpoint), this will need adjustment.
+2. Admin certificate list — GET /api/v1/certificates is assumed; if the backend returns 404, the admin page shows an empty state with a clear error. A future improvement: add the endpoint or repurpose the admin view to search by recipient.
+3. Template editor height — The editor uses h-[calc(100vh-4rem)] which may clip on small screens. Code splitting deferred to Phase 13.
+
+✻ Brewed for 13m 32s
+                                                                                                                                                                        copied 16681 chars to clipboard
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+──────────────────────────────────────────────────────────────────
+
+====================================================
+
+---
+Phase 9: Learning Paths & Progress — Complete
+
+Build Verification
+
+TypeScript:  ✅ Clean (zero errors)
+Build:       ✅ Success (2332 modules, 5.35s, 332KB gzip)
+
+---
+APIs Integrated
+
+┌────────┬───────────────────────────────────┬───────────────────────────────────────────┐
+│ Method │             Endpoint              │                   Usage                   │
+├────────┼───────────────────────────────────┼───────────────────────────────────────────┤
+│ GET    │ /api/v1/paths                     │ List paths (kind, domain, status filters) │
+├────────┼───────────────────────────────────┼───────────────────────────────────────────┤
+│ GET    │ /api/v1/paths/:id                 │ Path detail + steps + progress            │
+├────────┼───────────────────────────────────┼───────────────────────────────────────────┤
+│ POST   │ /api/v1/paths                     │ Create path                               │
+├────────┼───────────────────────────────────┼───────────────────────────────────────────┤
+│ PATCH  │ /api/v1/paths/:id                 │ Update path                               │
+├────────┼───────────────────────────────────┼───────────────────────────────────────────┤
+│ POST   │ /api/v1/paths/:id/publish         │ Publish draft                             │
+├────────┼───────────────────────────────────┼───────────────────────────────────────────┤
+│ POST   │ /api/v1/paths/:id/archive         │ Archive path                              │
+├────────┼───────────────────────────────────┼───────────────────────────────────────────┤
+│ POST   │ /api/v1/paths/:id/fork            │ Fork to personalized path                 │
+├────────┼───────────────────────────────────┼───────────────────────────────────────────┤
+│ POST   │ /api/v1/paths/:id/steps           │ Add step (room + order + prereqs)         │
+├────────┼───────────────────────────────────┼───────────────────────────────────────────┤
+│ PATCH  │ /api/v1/paths/:id/steps/:stepId   │ Edit step                                 │
+├────────┼───────────────────────────────────┼───────────────────────────────────────────┤
+│ DELETE │ /api/v1/paths/:id/steps/:stepId   │ Remove step                               │
+├────────┼───────────────────────────────────┼───────────────────────────────────────────┤
+│ POST   │ /api/v1/paths/:id/reorder-steps   │ Reorder steps                             │
+├────────┼───────────────────────────────────┼───────────────────────────────────────────┤
+│ GET    │ /api/v1/me/paths                  │ My enrolled paths                         │
+├────────┼───────────────────────────────────┼───────────────────────────────────────────┤
+│ GET    │ /api/v1/me/paths/:id/next-step    │ "What's next" resolver                    │
+├────────┼───────────────────────────────────┼───────────────────────────────────────────┤
+│ GET    │ /api/v1/me/paths/:id/progress     │ Path progress (%)                         │
+├────────┼───────────────────────────────────┼───────────────────────────────────────────┤
+│ POST   │ /api/v1/me/rooms/:roomId/start    │ Start room                                │
+├────────┼───────────────────────────────────┼───────────────────────────────────────────┤
+│ POST   │ /api/v1/me/rooms/:roomId/complete │ Complete room                             │
+├────────┼───────────────────────────────────┼───────────────────────────────────────────┤
+│ POST   │ /api/v1/me/rooms/:roomId/skip     │ Skip room                                 │
+├────────┼───────────────────────────────────┼───────────────────────────────────────────┤
+│ GET    │ /api/v1/career-maps               │ Career map list                           │
+├────────┼───────────────────────────────────┼───────────────────────────────────────────┤
+│ GET    │ /api/v1/career-maps/:id           │ Career map detail                         │
+└────────┴───────────────────────────────────┴───────────────────────────────────────────┘
+
+---
+Routes Added
+
+┌──────────────────────┬─────────────────────┬──────────────────────────────────────────────────────────────────┐
+│        Route         │      Component      │                              Access                              │
+├──────────────────────┼─────────────────────┼──────────────────────────────────────────────────────────────────┤
+│ /paths               │ PathsPage           │ All authenticated                                                │
+├──────────────────────┼─────────────────────┼──────────────────────────────────────────────────────────────────┤
+│ /paths/create        │ PathCreatePage      │ faculty/coordinator/college_admin/content_manager/platform_admin │
+├──────────────────────┼─────────────────────┼──────────────────────────────────────────────────────────────────┤
+│ /paths/:id           │ PathDetailPage      │ All authenticated                                                │
+├──────────────────────┼─────────────────────┼──────────────────────────────────────────────────────────────────┤
+│ /paths/:id/edit      │ PathEditPage        │ Same authoring roles                                             │
+├──────────────────────┼─────────────────────┼──────────────────────────────────────────────────────────────────┤
+│ /me/progress         │ MyProgressPage      │ All authenticated                                                │
+├──────────────────────┼─────────────────────┼──────────────────────────────────────────────────────────────────┤
+│ /me/progress/:pathId │ MyPathProgressPage  │ All authenticated                                                │
+├──────────────────────┼─────────────────────┼──────────────────────────────────────────────────────────────────┤
+│ /career-maps         │ CareerMapsPage      │ All authenticated                                                │
+├──────────────────────┼─────────────────────┼──────────────────────────────────────────────────────────────────┤
+│ /career-maps/:id     │ CareerMapDetailPage │ All authenticated                                                │
+├──────────────────────┼─────────────────────┼──────────────────────────────────────────────────────────────────┤
+│ /platform/progress   │ FacultyProgressPage │ faculty/coordinator/college_admin/platform_admin                 │
+└──────────────────────┴─────────────────────┴──────────────────────────────────────────────────────────────────┘
+
+---
+Components Created
+
+- PathCard — path grid card with inline progress bar + ProgressRing overlay
+- PathStatusBadge — kind (platform/curated/personalized) + status badges
+- ProgressRing — pure SVG circular progress indicator (violet → indigo → emerald as % increases)
+- CompletionBadge — "Completed" with checkmark
+- JourneyMap — TryHackMe-style vertical step list: completed (green checkmark) / in_progress (spinning loader) / locked (lock icon) / unlocked (circle) / skipped (skip arrow). Click to navigate to room.
+- MilestoneCard — milestone display with kind-aware icons
+- LearningTimeline — chronological activity list
+- AchievementCard — achievement with type-aware colors (certificate/path/event/assessment)
+- EnrollmentCard — compact enrollment card with progress bar + continue button
+- ProgressTable — faculty analytics table with radix Progress component
+
+---
+Hooks Created
+
+┌───────────────────────────────────────────────────────────────────────────┬──────────────────────────────────────────┐
+│                                   Hook                                    │               Description                │
+├───────────────────────────────────────────────────────────────────────────┼──────────────────────────────────────────┤
+│ usePaths                                                                  │ Infinite query for path list             │
+├───────────────────────────────────────────────────────────────────────────┼──────────────────────────────────────────┤
+│ usePath                                                                   │ Single path with steps + progress        │
+├───────────────────────────────────────────────────────────────────────────┼──────────────────────────────────────────┤
+│ useCreatePath, useUpdatePath, usePublishPath, useArchivePath, useForkPath │ Path mutations                           │
+├───────────────────────────────────────────────────────────────────────────┼──────────────────────────────────────────┤
+│ useAddPathStep, useUpdatePathStep, useRemovePathStep, useReorderPathSteps │ Step mutations                           │
+├───────────────────────────────────────────────────────────────────────────┼──────────────────────────────────────────┤
+│ useMyPaths                                                                │ My enrolled paths query                  │
+├───────────────────────────────────────────────────────────────────────────┼──────────────────────────────────────────┤
+│ useNextStep                                                               │ "What's next" resolver (5min stale)      │
+├───────────────────────────────────────────────────────────────────────────┼──────────────────────────────────────────┤
+│ usePathProgress                                                           │ Path progress %                          │
+├───────────────────────────────────────────────────────────────────────────┼──────────────────────────────────────────┤
+│ useStartRoom, useCompleteRoom, useSkipRoom                                │ Room progress mutations                  │
+├───────────────────────────────────────────────────────────────────────────┼──────────────────────────────────────────┤
+│ useProgressUpdates                                                        │ WS → cache updates + completion callback │
+├───────────────────────────────────────────────────────────────────────────┼──────────────────────────────────────────┤
+│ useCareerMaps, useCareerMap                                               │ Career map queries                       │
+└───────────────────────────────────────────────────────────────────────────┴──────────────────────────────────────────┘
+
+---
+WebSocket Events Integrated
+
+┌───────────────────────┬───────────────────────────────────────────────────────────────────────────────┐
+│         Event         │                                    Handler                                    │
+├───────────────────────┼───────────────────────────────────────────────────────────────────────────────┤
+│ path:progress_updated │ useProgressUpdates → set path progress % in cache                             │
+├───────────────────────┼───────────────────────────────────────────────────────────────────────────────┤
+│ room:completed        │ useProgressUpdates → invalidate PATH_PROGRESS                                 │
+├───────────────────────┼───────────────────────────────────────────────────────────────────────────────┤
+│ path:completed        │ useProgressUpdates → invalidate + callback; WebSocketProvider → success toast │
+└───────────────────────┴───────────────────────────────────────────────────────────────────────────────┘
+
+---
+Backend Limitations Documented
+
+Critical: Paths Module is Skeleton
+
+Audit finding: | paths | Skeleton | PrismaService | Same as curriculum — no service layer | Extract service layer |
+
+Impact:
+- Controllers reach Prisma directly with no service layer
+- No pagination on path lists (audit: "no pagination on syllabus tree")
+- Response shapes may not match documented DTOs exactly
+- GET /me/paths/next-step, GET /me/paths/:id/progress endpoints may return 404 or empty
+
+UI treatment: All path pages show an amber information banner. Empty states are properly handled with retry actions. The JourneyMap shows "No steps yet" gracefully.
+
+---
+Documentation/API Mismatches
+
+None found — path APIs match the documented spec. However, because the module is skeleton, many endpoints likely return empty arrays or 404s.
+
+---
+Technical Debt
+
+1. JourneyMap reorder — UI shows order numbers but no drag-and-drop reorder. The useReorderPathSteps hook is available but no drag-and-drop library is installed. Future: add @dnd-kit for the path editor.
+2. Step room ID input — PathEditPage requires entering raw Room UUIDs. Future: add a room search/picker dialog using the existing problems/rooms catalog.
+3. Fork tenant lock handling — The 403 tenant_locks_path_personalization code is caught and shown as a toast. Future: check tenant config before showing the Fork button.
+4. Achievement data source — Phase 9 achievements are sourced from certificates (Phase 8). A dedicated achievements API would surface more granular data (assessment passes, streaks). Not available in current backend.
+
+✻ Crunched for 14m 59s
